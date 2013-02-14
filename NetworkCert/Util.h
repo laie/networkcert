@@ -222,8 +222,8 @@ namespace Util
 	template<typename T>
 	class UnwindArray
 	{
-	private:
-		UnwindArray(const UnwindArray<T>&){ static_assert(false, "copy constructor"); }
+	//private:
+		//UnwindArray(const UnwindArray<T>&){ static_assert(false, "copy constructor"); }
 	public:
 		T *Arr;
 		
@@ -239,8 +239,8 @@ namespace Util
 	template<typename T>
 	class UnwindItem
 	{
-	private:
-		UnwindItem(const UnwindItem<T>&){ static_assert(false, "copy constructor"); }
+	//private:
+		//UnwindItem(const UnwindItem<T>&){ static_assert(false, "copy constructor"); }
 	public:
 		T *Item;
 
@@ -389,6 +389,7 @@ namespace Util
 	private:
 		BYTE MemoryForValue[sizeof(T)];
 		UnwindItem<T> UnwindableValue;
+
 	public:
 		template<typename TArchive>
 		void serialize(TArchive & Archive, const unsigned int Version)
@@ -411,11 +412,11 @@ namespace Util
 		}
 		
 		// Initializing with created one. Use new keyword to make it. It will be managed.
-		inline PropertyBase(T* ManagedInitializedValue)
-			: Value(*ManagedInitializedValue)
+		inline PropertyBase(T* ManagedInitializedValue):
+			Value(*ManagedInitializedValue),
+			UnwindableValue(ManagedInitializedValue)
 		{
 			Constructor();
-			UnwindableValue = ManagedInitializedValue;
 		}
 
 		inline ~PropertyBase()

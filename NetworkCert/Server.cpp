@@ -2,6 +2,9 @@
 
 DETECT_MEMORY_LEAK(-1);
 
+// i see there should be synchronization issues...
+// ¹Ì·ï¾ßÁö
+
 class Server
 {
 	PROPERTY_PROVIDE(Server);
@@ -21,22 +24,341 @@ private:
 	} PER_IO_DATA, *LPPER_IO_DATA;
 
 public:
+	class AccountManager;
+	class ChannelChunk;
+	class ClientChunk;
+
+	class AccountManager
+	{
+		PROPERTY_PROVIDE(AccountManager);
+
+	public:
+		class AccountChunk
+		{
+			PROPERTY_PROVIDE(AccountChunk);
+
+		private:
+			AccountChunk(const AccountChunk&){ static_assert(true, "no copy"); }
+
+			DECLARE_PROP_TYPE_R(AccountChunk, std::wstring, UserName, { return UserName.Value; }, { UserName.Value = Value; });
+			DECLARE_PROP_TYPE_R(AccountChunk, std::wstring, Password, { return Password.Value; }, { Password.Value = Value; });
+
+		public:
+			DECLARE_PROPERTY(UserName);
+			DECLARE_PROPERTY(Password);
+
+
+			inline AccountChunk(const std::wstring& UserName, const std::wstring& Password)
+			{
+				this->UserName = UserName;
+				this->Password = Password;
+			}
+		};
+
+	private:
+		DECLARE_PROP_TYPE_R(AccountManager, (std::map<std::wstring, std::tr1::shared_ptr<AccountChunk>>), ListAccount, { return ListAccount.Value; }, { ListAccount.Value = Value; });
+
+		void SaveToFile()
+		{
+			auto hf = CreateFile(L"users.txt", GENERIC_WRITE, NULL, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+			ATHROW(hf != INVALID_HANDLE_VALUE);
+
+			for ( auto i=ListAccount.Value.begin(); i != ListAccount.Value.end(); i++ )
+			{
+				auto& account = i->second;
+
+				DWORD sizestr, dwread;
+
+				sizestr = account->UserName().size();
+				WriteFile(hf, &sizestr, sizeof(sizestr), &dwread, NULL);
+				WriteFile(hf, account->UserName().data(), sizestr*2, &dwread, NULL);
+
+				sizestr = account->Password().size();
+				WriteFile(hf, &sizestr, sizeof(sizestr), &dwread, NULL);
+				WriteFile(hf, account->Password().data(), sizestr*2, &dwread, NULL);
+			}
+
+			CloseHandle(hf);
+		}
+
+	public:
+		DECLARE_PROPERTY(ListAccount);
+
+		inline AccountManager()
+		{
+			auto hf = CreateFile(L"users.txt", GENERIC_READ, NULL, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+			ATHROW(hf != INVALID_HANDLE_VALUE);
+
+			try
+			{
+				for ( ;; )
+				{
+					std::wstring username, password;
+
+					std::vector<wchar_t> buf;
+					DWORD sizestr = 0;
+					DWORD dwread = 0;
+					bool issucceeded = false;
+				
+					issucceeded = 0 != ReadFile(hf, &sizestr, sizeof(sizestr), &dwread, NULL);
+					ATHROW(issucceeded && dwread == sizeof(sizestr));
+					buf.resize(sizestr);
+					issucceeded = 0 != ReadFile(hf, buf.data(), buf.size()*2, &dwread, NULL);
+					ATHROW(issucceeded && dwread == buf.size()*2);
+					username = std::wstring(buf.begin(), buf.end());
+
+					issucceeded = 0 != ReadFile(hf, &sizestr, sizeof(sizestr), &dwread, NULL);
+					ATHROW(issucceeded && dwread == sizeof(sizestr));
+					buf.resize(sizestr);
+					issucceeded = 0 != ReadFile(hf, buf.data(), buf.size()*2, &dwread, NULL);
+					ATHROW(issucceeded && dwread == buf.size()*2);
+					password = std::wstring(buf.begin(), buf.end());
+
+					ListAccount.Value.insert(
+						std::pair<std::wstring, std::tr1::shared_ptr<AccountChunk>>(
+							username,
+							std::tr1::shared_ptr<AccountChunk>(
+								new AccountChunk(username,password)
+							)
+						)
+					);
+				}
+			}
+			catch ( std::exception& )
+			{
+
+			}
+
+			auto padmin = ListAccount().find(L"admin");
+			if ( padmin == ListAccount().end() )
+					ListAccount.Value.insert(
+						std::pair<std::wstring, std::tr1::shared_ptr<AccountChunk>>(
+							L"admin",
+							std::tr1::shared_ptr<AccountChunk>(
+								new AccountChunk(L"admin",L"passwordofadmin")
+							)
+						)
+					);
+			CloseHandle(hf);
+
+			std::wcout << L"total " << ListAccount().size() << L" accounts found." << std::endl;
+			for ( auto i=ListAccount().begin(); i != ListAccount().end(); i++ )
+				std::wcout << L"\t" << i->second->UserName() << L"\t" << i->second->Password() << std::endl;
+
+			SaveToFile();
+		}
+
+		inline ~AccountManager()
+		{
+			SaveToFile();
+		}
+	} Account;
+
+	class ChannelChunk
+	{
+		PROPERTY_PROVIDE(ChannelChunk);
+	private:
+		std::wstring Name;
+		DECLARE_PROP_TYPE_R(ChannelChunk, (std::list<std::tr1::shared_ptr<ClientChunk>>), ListClient, { return ListClient.Value; }, { ListClient.Value = Value; });
+		
+	public:
+		DECLARE_PROPERTY(ListClient);
+
+		inline ChannelChunk(const std::wstring& ChannelName)
+		{
+			this->Name = ChannelName;
+		}
+
+		void AddClient(const std::tr1::shared_ptr<ClientChunk>& Client)
+		{
+			ListClient.Value.push_back(Client);
+		}
+
+		void SubClient(const std::tr1::shared_ptr<ClientChunk>& Client)
+		{
+			ListClient.Value.remove_if([Client](const std::tr1::shared_ptr<ClientChunk>& A){ return Client == A; });
+		}
+	};
+
 	class ClientChunk
 	{
+	public:
+		enum STATUS_CODE
+		{
+			NotStarted,
+			Started,
+			Identified
+		};
+
 	private:
-		bool IsStarted;
+		const Server& Owner;
+
 		SOCKET hSockConnect;
 		DWORD IP;
 		WORD Port;
 
 		PER_HANDLE_DATA	HandleData;
 		PER_IO_DATA		IoBuffer;
+
+		std::queue<char> PacketQueue;
+
+		STATUS_CODE Status;
 		
-	public:
-		inline ClientChunk(SOCKET hSockToAssign, DWORD IP, WORD Port)
+		std::wstring UserName;
+
+		class PacketDivider
 		{
-			this->IsStarted = false;
-			this->hSockConnect = HandleData.hSock;
+			enum PACKET_READ_STATUS_CODE
+			{
+				WaitForPacketSizeArrive,
+				WaitForPacketBufferArrive,
+				PacketArrived
+			};
+
+			PACKET_READ_STATUS_CODE Status;
+			DWORD LastPacketSize;
+
+		public:
+			inline PacketDivider():
+				Status(WaitForPacketSizeArrive)
+			{
+			}
+
+			std::vector<char> Process(std::queue<char>& PacketQueue)
+			{
+				switch ( Status )
+				{
+				case WaitForPacketSizeArrive:
+					if ( PacketQueue.size() >= 4 )
+					{
+						Status = WaitForPacketBufferArrive;
+
+						DWORD size;
+						char* psizeds = (char*)&size;
+
+						for ( DWORD i=0; i < sizeof(size); i++ )
+						{
+							psizeds[i] = PacketQueue.front();
+							PacketQueue.pop();
+						}
+						LastPacketSize = size;
+						
+						goto processbuffer;
+					}
+					break;
+
+				case WaitForPacketBufferArrive:
+processbuffer:
+					if ( PacketQueue.size() >= LastPacketSize )
+					{
+						Status = WaitForPacketSizeArrive;
+
+						std::vector<char> retvector(LastPacketSize);
+						for ( DWORD i=0; i < LastPacketSize; i++ )
+						{
+							retvector[i] = PacketQueue.front();
+							PacketQueue.pop();
+						}
+						return retvector;
+					}
+					break;
+
+				default: NRTHROW();
+				}
+
+				return std::vector<char>();
+			}
+		} PacketProcessor;
+	private:
+		void Send(const std::string& Buffer)
+		{
+			std::vector<char> sendbuf;
+			sendbuf.resize(sendbuf.size()+4);
+			(DWORD&)sendbuf[sendbuf.size()-4] = Buffer.size();
+			sendbuf.insert(sendbuf.end(), Buffer.begin(), Buffer.end());
+
+			send(hSockConnect, sendbuf.data(), sendbuf.size(), 0);
+		}
+
+		void ProcessPacket()
+		{
+			auto& packetbuffer = PacketProcessor.Process(PacketQueue);
+			if ( !packetbuffer.size() ) return;
+
+			std::strstream sstream(packetbuffer.data(), packetbuffer.size());
+
+			BYTE packetcode;
+			ATHROW(sstream.read((char*)&packetcode, 1));
+
+			switch ( Status )
+			{
+			case Started:
+				switch ( packetcode )
+				{
+					case 0:
+						{
+							std::wstring username;
+							std::wstring password;
+							std::vector<wchar_t> buf;
+							DWORD strsize;
+
+							ATHROW(sstream.read((char*)&strsize, 4));
+							buf.resize(strsize);
+							ATHROW(sstream.read((char*)buf.data(), buf.size()*2));
+							username = std::wstring(buf.begin(), buf.end());
+
+							ATHROW(sstream.read((char*)&strsize, 4));
+							buf.resize(strsize);
+							ATHROW(sstream.read((char*)buf.data(), buf.size()*2));
+							password = std::wstring(buf.begin(), buf.end());
+
+							auto paccount = Owner.Account.ListAccount().find(username);
+							if ( paccount != Owner.Account.ListAccount().end()
+								&& paccount->second->Password() == password
+								)
+							{
+								// succeeded
+								Status = Identified;
+								UserName = username;
+
+								BYTE answercode = 1;
+								std::stringstream ss;
+								ss.write((char*)&answercode, 1);
+								send(hSockConnect, ss.str().data(), ss.str().size(), 0);
+							} else
+							{
+								// failed
+								BYTE answercode = 0;
+								std::stringstream ss;
+								ss.write((char*)&answercode, 1);
+								send(hSockConnect, ss.str().data(), ss.str().size(), 0);
+							}
+
+						}
+						break;
+					default: MTHROW(InvalidOperation, "invalid packet on not identified status", );
+				}
+				break;
+
+			case Identified:
+				switch ( packetcode )
+				{
+					case 0:
+						ATHROW(Status == Started);
+						Status = Identified;
+						break;
+				}
+				break;
+			}
+
+		}
+
+	public:
+		inline ClientChunk(const Server& ServerInstance, SOCKET hSockToAssign, DWORD IP, WORD Port):
+			Owner(ServerInstance)
+		{
+			this->Status = NotStarted;
+			this->hSockConnect = hSockToAssign;
 			this->IP = IP;
 			this->Port = Port;
 
@@ -55,15 +377,25 @@ public:
 
 		inline ~ClientChunk()
 		{
-			closesocket(hSockConnect);
+			while ( WSAEWOULDBLOCK == closesocket(hSockConnect) );
 		}
 
-		void Start(HANDLE hIoCompletionPort)
+		void Start()
 		{
-			IsStarted = true;
+			ATHROW(Status == NotStarted);
+			Status = Started;
+
+			CreateIoCompletionPort((HANDLE)hSockConnect, Owner.hIoCompletionPort, (DWORD)&HandleData, 0);
+			// number of concurrent thread would defaultly be cpu's cores number
+			// when work thread got wait status(like Sleep), iocp reports completion to the other threads,
+			// so making *2 of threads is fine
+			// reference: http://ssb777.blogspot.kr/2009/07/socket-iocp-2.html
+
+			// starts with recv,
+			// tcp socket must do one work at once.
+			// like recv, send, wait
 			DWORD recvedbytes = 0,
 				flags = 0;
-			CreateIoCompletionPort((HANDLE)hSockConnect, hIoCompletionPort, (DWORD)&HandleData, 0);
 			WSARecv(
 				hSockConnect,
 				&IoBuffer.WsaBuf,
@@ -74,10 +406,26 @@ public:
 				NULL
 				);
 		}
-
-		void Handle(const std::vector<char>& Buffer)
+		
+		void HandleAsync(const std::vector<char>& Buffer)
 		{
-			ATHROW(IsStarted);
+			ATHROW(Status >= Started);
+			
+			std::for_each(Buffer.begin(), Buffer.end(), [this](const char& ch){ this->PacketQueue.push(ch); });
+
+			ProcessPacket();
+
+			DWORD recvedbytes = 0,
+				flags = 0;
+			WSARecv(
+				hSockConnect,
+				&IoBuffer.WsaBuf,
+				1,
+				&recvedbytes,
+				&flags,
+				&IoBuffer.Overlapped,
+				NULL
+				);
 		}
 	};
 
@@ -135,7 +483,7 @@ public:
 		hSockListen = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
 		ATHROW(hSockListen != INVALID_SOCKET);
 
-		SOCKADDR_IN adrlisten;
+		SOCKADDR_IN adrlisten = { };
 		adrlisten.sin_family = AF_INET;
 		adrlisten.sin_addr.s_addr = htonl(INADDR_ANY);
 		adrlisten.sin_port = htons(48486);
@@ -148,9 +496,9 @@ public:
 				(
 					[this]()
 					{
-						DWORD bytestransferred;
-						PER_HANDLE_DATA targetinfo;
-						PER_IO_DATA olbuffer;
+						DWORD bytestransferred = 0;
+						PER_HANDLE_DATA *targetinfo = 0;
+						PER_IO_DATA *olbuffer = 0;
 						
 						bool issucceeded =
 							FALSE !=
@@ -163,21 +511,29 @@ public:
 								INFINITE
 							);
 
+						ATHROW(targetinfo);
+						ATHROW(olbuffer);
 
-
-						auto pclientpair = ListClient().find((DWORD)targetinfo.hSock);
-						ATHROW(pclientpair != ListClient().cend());
-						auto pclient = pclientpair->second;
-						pclient->Handle(std::vector<char>(olbuffer.WsaBuf.buf, olbuffer.WsaBuf.buf+olbuffer.WsaBuf.len));
-
-						if ( bytestransferred )
+						try
 						{
+							auto pclientpair = ListClient().find((DWORD)targetinfo->hSock);
+							ATHROW(pclientpair != ListClient().cend());
+							auto pclient = pclientpair->second;
 
+							if ( bytestransferred )
+							{
+								pclient->HandleAsync(std::vector<char>(olbuffer->WsaBuf.buf, olbuffer->WsaBuf.buf+bytestransferred));
+							}
+							else
+							{
+								// disconnected, handle for it
+								ListClient.Value.erase(pclientpair);
+							}
 						}
-						else
+						catch ( std::exception& exception )
 						{
-							// disconnected, handle for it
-							ListClient.Value.erase(pclientpair);
+							MessageBoxA(0, exception.what(), 0, 0);
+							exit(-1);
 						}
 					}
 				);
@@ -194,6 +550,7 @@ public:
 			
 			std::tr1::shared_ptr<ClientChunk> pclient(
 					new ClientChunk(
+						*this,
 						hsockclient,
 						ntohl(adrclient.sin_addr.s_addr),
 						ntohs(adrclient.sin_port)
@@ -205,7 +562,7 @@ public:
 				)
 			);
 
-			pclient->Start(hIoCompletionPort);
+			pclient->Start();
 		}
 	}
 

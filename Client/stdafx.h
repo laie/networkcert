@@ -9,4 +9,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #include <winsock2.h>
 #include <list>
+#include <strstream>
+#include <sstream>
+#include <iostream>
 #include "Util.h"

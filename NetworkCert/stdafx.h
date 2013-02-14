@@ -14,4 +14,7 @@
 #include <functional>
 #include <thread>
 #include <memory>
+#include <string>
+#include <queue>
+#include <sstream>
 #include "Util.h"
