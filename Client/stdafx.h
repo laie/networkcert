@@ -12,4 +12,6 @@
 #include <strstream>
 #include <sstream>
 #include <iostream>
+#include <functional>
+#include <thread>
 #include "Util.h"

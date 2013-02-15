@@ -5,6 +5,8 @@ DETECT_MEMORY_LEAK(-1);
 // i see there should be synchronization issues...
 // ¹Ì·ï¾ßÁö
 
+// [2013.2.15 17:24] no time for this. i have to write shell, log analyzer, and so on
+
 class Server
 {
 	PROPERTY_PROVIDE(Server);
@@ -158,10 +160,11 @@ public:
 	{
 		PROPERTY_PROVIDE(ChannelChunk);
 	private:
-		std::wstring Name;
+		DECLARE_PROP_TYPE_R(ChannelChunk, std::wstring, Name, { return Name.Value; }, { Name.Value = Value; });
 		DECLARE_PROP_TYPE_R(ChannelChunk, (std::list<std::tr1::shared_ptr<ClientChunk>>), ListClient, { return ListClient.Value; }, { ListClient.Value = Value; });
 		
 	public:
+		DECLARE_PROPERTY(Name);
 		DECLARE_PROPERTY(ListClient);
 
 		inline ChannelChunk(const std::wstring& ChannelName)
@@ -169,19 +172,33 @@ public:
 			this->Name = ChannelName;
 		}
 
+		void TransferUserMessage(const std::wstring& UserTransferring, const std::wstring& SayMessage)
+		{
+			for ( auto i=ListClient().begin(); i != ListClient().end(); i++ )
+				i->get()->RecvChannelMessage(UserTransferring, SayMessage);
+		}
+
+		void MoveAllUsersTo(std::tr1::shared_ptr<ChannelChunk> pChannel)
+		{
+			std::list<std::tr1::shared_ptr<ClientChunk>> listclientcopy(ListClient().begin(), ListClient().end());
+			for ( auto i=listclientcopy.begin(); i != listclientcopy.end(); i++ )
+				i->get()->MoveChannel(pChannel);
+		}
+
 		void AddClient(const std::tr1::shared_ptr<ClientChunk>& Client)
 		{
 			ListClient.Value.push_back(Client);
 		}
 
-		void SubClient(const std::tr1::shared_ptr<ClientChunk>& Client)
+		void SubClient(const ClientChunk *Client)
 		{
-			ListClient.Value.remove_if([Client](const std::tr1::shared_ptr<ClientChunk>& A){ return Client == A; });
+			ListClient.Value.remove_if([Client](const std::tr1::shared_ptr<ClientChunk>& A){ return Client == A.get(); });
 		}
 	};
 
 	class ClientChunk
 	{
+		PROPERTY_PROVIDE(ClientChunk);
 	public:
 		enum STATUS_CODE
 		{
@@ -191,7 +208,12 @@ public:
 		};
 
 	private:
-		const Server& Owner;
+		DECLARE_PROP_TYPE_R(ClientChunk, std::tr1::shared_ptr<ChannelChunk>, ChannelJoinedIn, { return ChannelJoinedIn.Value; }, { ChannelJoinedIn.Value = Value; });
+		DECLARE_PROP_TYPE_R(ClientChunk, std::wstring, UserName, { return UserName.Value; }, { UserName.Value = Value; });
+		DECLARE_PROP_TYPE_R(ClientChunk, STATUS_CODE, Status, { return Status.Value; }, { Status.Value = Value; });
+
+
+		Server& Owner;
 
 		SOCKET hSockConnect;
 		DWORD IP;
@@ -201,10 +223,6 @@ public:
 		PER_IO_DATA		IoBuffer;
 
 		std::queue<char> PacketQueue;
-
-		STATUS_CODE Status;
-		
-		std::wstring UserName;
 
 		class PacketDivider
 		{
@@ -269,15 +287,15 @@ processbuffer:
 				return std::vector<char>();
 			}
 		} PacketProcessor;
-	private:
+
 		void Send(const std::string& Buffer)
 		{
-			std::vector<char> sendbuf;
-			sendbuf.resize(sendbuf.size()+4);
-			(DWORD&)sendbuf[sendbuf.size()-4] = Buffer.size();
-			sendbuf.insert(sendbuf.end(), Buffer.begin(), Buffer.end());
+			std::stringstream ss;
+			DWORD sizepacket = Buffer.size();
+			ss.write((char*)&sizepacket, sizeof(sizepacket));
+			ss.write(Buffer.data(), Buffer.size());
 
-			send(hSockConnect, sendbuf.data(), sendbuf.size(), 0);
+			send(hSockConnect, ss.str().data(), ss.str().size(), 0);
 		}
 
 		void ProcessPacket()
@@ -297,9 +315,10 @@ processbuffer:
 				{
 					case 0:
 						{
+							// identify
 							std::wstring username;
 							std::wstring password;
-							std::vector<wchar_t> buf;
+							std::wstring buf;
 							DWORD strsize;
 
 							ATHROW(sstream.read((char*)&strsize, 4));
@@ -320,18 +339,15 @@ processbuffer:
 								// succeeded
 								Status = Identified;
 								UserName = username;
+								
+								LoginSucceeded();
 
-								BYTE answercode = 1;
-								std::stringstream ss;
-								ss.write((char*)&answercode, 1);
-								send(hSockConnect, ss.str().data(), ss.str().size(), 0);
+								MoveChannel(Owner.LobbyChannel);
+								ShowList();
 							} else
 							{
-								// failed
-								BYTE answercode = 0;
-								std::stringstream ss;
-								ss.write((char*)&answercode, 1);
-								send(hSockConnect, ss.str().data(), ss.str().size(), 0);
+								LoginFailed();
+								LoginRequired();
 							}
 
 						}
@@ -343,10 +359,55 @@ processbuffer:
 			case Identified:
 				switch ( packetcode )
 				{
-					case 0:
-						ATHROW(Status == Started);
-						Status = Identified;
+					case 1:
+						{
+							// say
+							DWORD strsize;
+							ATHROW(sstream.read((char*)&strsize, sizeof(strsize)));
+							std::wstring saymessage;
+							saymessage.resize(strsize);
+							ATHROW(sstream.read((char*)const_cast<wchar_t*>(saymessage.data()), strsize*2));
+							
+							Say(saymessage);
+						}
 						break;
+					case 2:
+						{
+							// join
+							DWORD strsize;
+							ATHROW(sstream.read((char*)&strsize, sizeof(strsize)));
+							std::wstring channelname;
+							channelname.resize(strsize);
+							ATHROW(sstream.read((char*)const_cast<wchar_t*>(channelname.data()), strsize*2));
+							
+							auto ichannel = Owner.ListChannel().find(channelname);
+							std::tr1::shared_ptr<ChannelChunk> pchannel;
+							if ( ichannel == Owner.ListChannel().end() )
+							{
+								pchannel = Owner.AddChannel(channelname);
+							} else pchannel = ichannel->second;
+
+							MoveChannel(pchannel);
+						}
+						break;
+					case 3:
+						{
+							// destroying of channel
+							// simply just not makes sense at all ;)
+							// but to accquire the conditions, it becomes a necessary feature
+							
+							DestroyChannel();
+						}
+						break;
+					case 4:
+						{
+							// get list
+
+							ShowList();
+						}
+						break;
+					default: MTHROW(InvalidOperation, "invalid packet", );
+
 				}
 				break;
 			}
@@ -354,7 +415,11 @@ processbuffer:
 		}
 
 	public:
-		inline ClientChunk(const Server& ServerInstance, SOCKET hSockToAssign, DWORD IP, WORD Port):
+		DECLARE_PROPERTY(Status);
+		DECLARE_PROPERTY(ChannelJoinedIn);
+		DECLARE_PROPERTY(UserName);
+
+		inline ClientChunk(Server& ServerInstance, SOCKET hSockToAssign, DWORD IP, WORD Port):
 			Owner(ServerInstance)
 		{
 			this->Status = NotStarted;
@@ -391,9 +456,8 @@ processbuffer:
 			// so making *2 of threads is fine
 			// reference: http://ssb777.blogspot.kr/2009/07/socket-iocp-2.html
 
-			// starts with recv,
-			// tcp socket must do one work at once.
-			// like recv, send, wait
+			LoginRequired();
+
 			DWORD recvedbytes = 0,
 				flags = 0;
 			WSARecv(
@@ -407,13 +471,116 @@ processbuffer:
 				);
 		}
 		
+		void LoginRequired()
+		{
+			std::string sendbuf("\x00\x00", 2);
+			Send(sendbuf);
+		}
+
+		void LoginFailed()
+		{
+			std::string sendbuf("\x00\x01\x00", 3);
+			Send(sendbuf);
+		}
+
+		void LoginSucceeded()
+		{
+			std::string sendbuf("\x00\x01\x01", 3);
+			Send(sendbuf);
+		}
+
+		void Say(const std::wstring& SayMessage)
+		{
+			if ( ChannelJoinedIn() )
+				ChannelJoinedIn->TransferUserMessage(UserName, SayMessage);
+		}
+
+		void RecvChannelMessage(const std::wstring& UserSaying, const std::wstring& Message)
+		{
+			std::stringstream ss;
+
+			BYTE packetcode = 1;
+			DWORD sizestr;
+			ss.write((char*)&packetcode, sizeof(packetcode));
+
+			sizestr = UserSaying.size();
+			ss.write((char*)&sizestr, sizeof(sizestr));
+			ss.write((char*)UserSaying.data(), sizestr*2);
+
+			sizestr = Message.size();
+			ss.write((char*)&sizestr, sizeof(sizestr));
+			ss.write((char*)Message.data(), sizestr*2);
+			Send(ss.str());
+		}
+
+		void RecvServerMessage(const std::wstring& Message)
+		{
+			std::stringstream ss;
+
+			BYTE packetcode = 2;
+			DWORD sizestr = Message.size();
+			ss.write((char*)&packetcode, sizeof(packetcode));
+			ss.write((char*)&sizestr, sizeof(sizestr));
+			ss.write((char*)Message.data(), sizestr*2);
+			Send(ss.str());
+		}
+
+		void MoveChannel(const std::shared_ptr<ChannelChunk> pChannel)
+		{
+			if ( ChannelJoinedIn() == pChannel ) return;
+			if ( ChannelJoinedIn() ) ChannelJoinedIn->SubClient(this);
+			if ( pChannel ) pChannel->AddClient(Owner.ListClient().find(hSockConnect)->second);
+			ChannelJoinedIn = pChannel;
+			RecvServerMessage(L"Joined the channel " + pChannel->Name());
+		}
+
+		void DestroyChannel()
+		{
+			if ( !ChannelJoinedIn()
+				|| ChannelJoinedIn->Name() == L"lobby" ) return;
+			Owner.DestroyChannel(ChannelJoinedIn);
+		}
+
+		void ShowList()
+		{
+			std::stringstream ss;
+
+			BYTE packetcode = 4;
+			ss.write((char*)&packetcode, sizeof(packetcode));
+
+			if ( ChannelJoinedIn() )
+			{
+				DWORD bufcount=ChannelJoinedIn->ListClient().size();
+				ss.write((char*)&bufcount, sizeof(bufcount));
+				for ( auto i=ChannelJoinedIn->ListClient().begin(); i != ChannelJoinedIn->ListClient().end(); i++ )
+				{
+					DWORD sizestr = i->get()->UserName().size();
+					ss.write((char*)&sizestr, sizeof(sizestr));
+					ss.write((char*)i->get()->UserName().data(), sizestr*2);
+				}
+			}
+			else
+			{
+				DWORD bufcount=0;
+				ss.write((char*)bufcount, sizeof(bufcount));
+			}
+			Send(ss.str());
+		}
+
 		void HandleAsync(const std::vector<char>& Buffer)
 		{
 			ATHROW(Status >= Started);
 			
 			std::for_each(Buffer.begin(), Buffer.end(), [this](const char& ch){ this->PacketQueue.push(ch); });
 
-			ProcessPacket();
+			try
+			{
+				ProcessPacket();
+			}
+			catch ( ... )
+			{
+				RecvServerMessage(L"exception while processing packet");
+			}
 
 			DWORD recvedbytes = 0,
 				flags = 0;
@@ -439,6 +606,9 @@ private:
 	DECLARE_PROP_TYPE_R(Server, (std::map<DWORD, std::tr1::shared_ptr<ClientChunk>>), ListClient, { return ListClient.Value; }, { ListClient.Value = Value; });
 	DECLARE_PROP_TYPE_R(Server, HANDLE, hIoCompletionPort, { return hIoCompletionPort.Value; }, { hIoCompletionPort.Value = Value; });
 	DECLARE_PROP_TYPE_R(Server, STATUS_CODE, Status, { return Status.Value; }, { Status.Value = Value; });
+	DECLARE_PROP_TYPE_R(Server, (std::map<std::wstring, std::tr1::shared_ptr<ChannelChunk>>), ListChannel, { return ListChannel.Value; }, { ListChannel.Value = Value; });
+
+	std::shared_ptr<ChannelChunk> LobbyChannel;
 
 	SOCKET hSockListen;
 	DWORD ProcessorNumber;
@@ -452,6 +622,7 @@ private:
 
 public:
 	DECLARE_PROPERTY(ListClient);
+	DECLARE_PROPERTY(ListChannel);
 	DECLARE_PROPERTY(hIoCompletionPort);
 	DECLARE_PROPERTY(Status);
 
@@ -473,12 +644,36 @@ public:
 		CloseHandle(hIoCompletionPort);
 	}
 
+	void DestroyChannel(std::tr1::shared_ptr<ChannelChunk> pChannel)
+	{
+		if ( pChannel == LobbyChannel ) return;
+
+		pChannel->MoveAllUsersTo(pChannel);
+		ListChannel.Value.erase(pChannel->Name());
+	}
+
+	std::shared_ptr<ChannelChunk> AddChannel(const std::wstring& ChannelName)
+	{
+		ATHROW(ListChannel().end() == ListChannel().find(ChannelName));
+		auto channel = std::shared_ptr<ChannelChunk>(new ChannelChunk(ChannelName));
+		ListChannel.Value.insert(
+			std::pair<std::wstring, std::shared_ptr<ChannelChunk>>(
+				ChannelName,
+				channel
+			)
+		);
+
+		return channel;
+	}
+
 	void Start()
 	{
 		ATHROW(Status == NotStarted);
 
 		Status = Started;
 		std::wcout << L"starting server... ";
+
+		LobbyChannel = AddChannel(L"lobby");
 
 		hSockListen = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
 		ATHROW(hSockListen != INVALID_SOCKET);
@@ -496,44 +691,47 @@ public:
 				(
 					[this]()
 					{
-						DWORD bytestransferred = 0;
-						PER_HANDLE_DATA *targetinfo = 0;
-						PER_IO_DATA *olbuffer = 0;
+						for ( ;; )
+						{
+							DWORD bytestransferred = 0;
+							PER_HANDLE_DATA *targetinfo = 0;
+							PER_IO_DATA *olbuffer = 0;
 						
-						bool issucceeded =
-							FALSE !=
-							GetQueuedCompletionStatus
-							(
-								this->hIoCompletionPort,
-								&bytestransferred,
-								(PULONG_PTR)&targetinfo,
-								(LPOVERLAPPED*)&olbuffer,
-								INFINITE
-							);
+							bool issucceeded =
+								FALSE !=
+								GetQueuedCompletionStatus
+								(
+									this->hIoCompletionPort,
+									&bytestransferred,
+									(PULONG_PTR)&targetinfo,
+									(LPOVERLAPPED*)&olbuffer,
+									INFINITE
+								);
 
-						ATHROW(targetinfo);
-						ATHROW(olbuffer);
+							ATHROW(targetinfo);
+							ATHROW(olbuffer);
 
-						try
-						{
-							auto pclientpair = ListClient().find((DWORD)targetinfo->hSock);
-							ATHROW(pclientpair != ListClient().cend());
-							auto pclient = pclientpair->second;
-
-							if ( bytestransferred )
+							try
 							{
-								pclient->HandleAsync(std::vector<char>(olbuffer->WsaBuf.buf, olbuffer->WsaBuf.buf+bytestransferred));
+								auto pclientpair = ListClient().find((DWORD)targetinfo->hSock);
+								ATHROW(pclientpair != ListClient().cend());
+								auto pclient = pclientpair->second;
+
+								if ( bytestransferred )
+								{
+									pclient->HandleAsync(std::vector<char>(olbuffer->WsaBuf.buf, olbuffer->WsaBuf.buf+bytestransferred));
+								}
+								else
+								{
+									// disconnected, handle for it
+									ListClient.Value.erase(pclientpair);
+								}
 							}
-							else
+							catch ( std::exception& exception )
 							{
-								// disconnected, handle for it
-								ListClient.Value.erase(pclientpair);
+								MessageBoxA(0, exception.what(), 0, 0);
+								exit(-1);
 							}
-						}
-						catch ( std::exception& exception )
-						{
-							MessageBoxA(0, exception.what(), 0, 0);
-							exit(-1);
 						}
 					}
 				);
