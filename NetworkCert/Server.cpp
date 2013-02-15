@@ -648,7 +648,7 @@ public:
 	{
 		if ( pChannel == LobbyChannel ) return;
 
-		pChannel->MoveAllUsersTo(pChannel);
+		pChannel->MoveAllUsersTo(LobbyChannel);
 		ListChannel.Value.erase(pChannel->Name());
 	}
 
