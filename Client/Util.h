@@ -2,7 +2,6 @@
 // boost-removed version of Util.h
 
 #include <stdexcept>
-#include <atlconv.h>  
 
 #include <assert.h>
 
@@ -192,17 +191,6 @@ namespace Util
 	};
 #pragma endregion
 #pragma region Functions
-	static inline std::wstring strconv(const std::string & str)
-	{
-		USES_CONVERSION;
-		return std::wstring(A2W(str.c_str()));
-	}
-	static inline std::string strconv(const std::wstring & str)
-	{
-		USES_CONVERSION;
-		return std::string(W2A(str.c_str()));
-	}
-
 	template<typename T>
 	static inline typename T::off_type stream_size(T & Stream)
 	{
@@ -293,7 +281,7 @@ namespace Util
 			swprintf_s(procstr(), lenbuf, L"[Exception: %s] %s", ExceptionName.c_str(), procstrreflect);
 			vswprintf_s(procstrreflect(), lenbuf, procstr(), Args);
 			Message = std::wstring(procstrreflect());
-			MessageMB = strconv(Message);
+			//MessageMB = strconv(Message);
 
 			__if_exists(Log)
 			{
